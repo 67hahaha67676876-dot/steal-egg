@@ -1,9 +1,9 @@
 --[[
-    EGG HUNTER HUB - Steal An Egg
-    Kapsamli script: Auto Steal, Auto Hatch, Teleport, ESP, Fly, Speed ve daha fazlasi
+    EGG HUNTER HUB v2 - Steal An Egg
+    Anti-cheat bypass + Gercek remote kullanimi
 ]]
 
-print("[EGG HUB] Yukleniyor...")
+print("[EGG HUB v2] Yukleniyor...")
 
 -- ===================== SERVICES =====================
 local Players = game:GetService("Players")
@@ -12,11 +12,176 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lighting = game:GetService("Lighting")
-local VirtualInputManager = game:GetService("VirtualInputManager")
 local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
 local Camera = workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
-local Mouse = LocalPlayer:GetMouse()
+
+-- ===================== FIND NETWORKING REMOTES =====================
+local Networking = nil
+pcall(function()
+    Networking = ReplicatedStorage.Packages.Networking
+end)
+
+local function getRemote(name)
+    if not Networking then return nil end
+    local r = nil
+    pcall(function()
+        r = Networking:FindFirstChild(name)
+    end)
+    if not r then
+        -- bazen alt klasorlerde olabilir
+        pcall(function()
+            for _, child in ipairs(Networking:GetDescendants()) do
+                if child.Name == name then
+                    r = child
+                    break
+                end
+            end
+        end)
+    end
+    return r
+end
+
+-- Core Remotes
+local Remotes = {
+    -- EggWorld
+    AskFieldEggCarry = getRemote("RF/EggWorld/AskFieldEggCarry"),
+    AskFieldEggDrop = getRemote("RF/EggWorld/AskFieldEggDrop"),
+    AskFieldEggSnapshot = getRemote("RF/EggWorld/AskFieldEggSnapshot"),
+    AskHatch = getRemote("RF/EggWorld/AskHatch"),
+    AskFinishHatch = getRemote("RF/EggWorld/AskFinishHatch"),
+    AskPlaceEgg = getRemote("RF/EggWorld/AskPlaceEgg"),
+    AskSkipGrowth = getRemote("RF/EggWorld/AskSkipGrowth"),
+    AskEggRecord = getRemote("RF/EggWorld/AskEggRecord"),
+    AskLiveSnapshot = getRemote("RF/EggWorld/AskLiveSnapshot"),
+    -- Halloween
+    HalloweenBuyEgg = getRemote("RF/HalloweenDimension/AskBuyEgg"),
+    HalloweenCarryEgg = getRemote("RF/HalloweenDimension/AskCarryEgg"),
+    HalloweenDropEgg = getRemote("RF/HalloweenDimension/AskDropEgg"),
+    -- PetSatchel
+    SellEveryPet = getRemote("RE/PetSatchel/SellEveryPet"),
+    SellSelection = getRemote("RE/PetSatchel/SellSelection"),
+    SellPet = getRemote("RE/PetSatchel/SellPet"),
+    WriteFavourite = getRemote("RE/PetSatchel/WriteFavourite"),
+    -- Haul
+    FetchAutoSell = getRemote("RF/Haul/FetchAutoSell"),
+    WearBest = getRemote("RF/Haul/WearBest"),
+    WriteAutoSell = getRemote("RF/Haul/WriteAutoSell"),
+    OfferFullSatchelSale = getRemote("RF/Haul/OfferFullSatchelSale"),
+    -- Scramble (Dr. Scramble)
+    ScrambleRequest = getRemote("RF/Scramble/Request"),
+    ScrambleCollect = getRemote("RE/Scramble/Collect"),
+    -- Rift
+    RiftState = getRemote("RF/Rift/AskState"),
+    RiftTradeIn = getRemote("RF/Rift/AskTradeIn"),
+    -- Guard
+    GuardEnabled = getRemote("RF/GuardPatrol/AskEnabled"),
+    -- Codex
+    CodexRedeem = getRemote("RF/Codex/AskRedeem"),
+    CodexRedeemAll = getRemote("RF/Codex/AskRedeemAll"),
+    -- Bloomery (Mutation)
+    BloomeryLoadEgg = getRemote("RF/Bloomery/AskLoadEgg"),
+    BloomeryMutate = getRemote("RF/Bloomery/AskMutate"),
+}
+
+print("[EGG HUB v2] Remote'lar yuklendi:")
+local remoteCount = 0
+for name, remote in pairs(Remotes) do
+    if remote then
+        remoteCount = remoteCount + 1
+    end
+end
+print("[EGG HUB v2] " .. remoteCount .. " remote bulundu")
+
+-- ===================== ANTI-CHEAT BYPASS =====================
+local bypassActive = false
+
+local function setupAntiCheatBypass()
+    -- 1. Observability (izleme) remote'larini hookla
+    -- Bu remote'lar sunucuya oyuncu davranisi hakkinda veri gonderir
+    local blockedRemotes = {
+        "RE/Observability/Data",
+        "RE/Observability/Emit",
+        "RE/Observability/Start",
+        "RE/Observability/Stop",
+        "RE/Telemetry/SubmitIdleState",
+        "RE/GuardPatrol/Rouse",
+    }
+
+    -- 2. hookmetamethod ile __namecall hook
+    if hookmetamethod then
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            local args = {...}
+
+            -- FireServer / InvokeServer cagrilerini kontrol et
+            if method == "FireServer" or method == "InvokeServer" then
+                local remoteName = ""
+                pcall(function() remoteName = self.Name end)
+
+                -- Guard hiz algilama - SpeedToll remote'larini blokla
+                -- (bunlar server->client olabilir ama yine de kontrol)
+                if remoteName:find("GuardPatrol") then
+                    -- Guard patrol ile ilgili client->server mesajlarini engelle
+                    if method == "FireServer" then
+                        return
+                    end
+                end
+
+                -- Observability/Telemetry verilerini engelle
+                for _, blocked in ipairs(blockedRemotes) do
+                    if remoteName == blocked or self.Name == blocked then
+                        if method == "FireServer" then
+                            return
+                        end
+                    end
+                end
+
+                -- Observability altindaki tum FireServer'lari engelle
+                if remoteName:find("Observability") or remoteName:find("Telemetry") then
+                    if method == "FireServer" then
+                        return
+                    end
+                end
+            end
+
+            return oldNamecall(self, ...)
+        end))
+        bypassActive = true
+        print("[EGG HUB v2] Anti-cheat bypass aktif (hookmetamethod)")
+    elseif hookfunction then
+        -- Alternatif: hookfunction ile
+        pcall(function()
+            for _, remoteName in ipairs(blockedRemotes) do
+                local remote = getRemote(remoteName)
+                if remote and remote:IsA("RemoteEvent") then
+                    local oldFire = remote.FireServer
+                    remote.FireServer = newcclosure(function()
+                        return -- blokla
+                    end)
+                end
+            end
+        end)
+        bypassActive = true
+        print("[EGG HUB v2] Anti-cheat bypass aktif (hookfunction)")
+    end
+
+    -- 3. Kernel script'i zayiflatmayi dene
+    pcall(function()
+        local kernel = LocalPlayer.PlayerScripts:FindFirstChild("Kernel")
+        if kernel then
+            -- Kernel'i disable etmek oyunu bozabilir,
+            -- sadece bilgi olarak logla
+            print("[EGG HUB v2] Kernel scripti bulundu: " .. kernel:GetFullName())
+        end
+    end)
+
+    return bypassActive
+end
+
+local bypassResult = setupAntiCheatBypass()
 
 -- ===================== GUI PARENT =====================
 local function getGuiParent()
@@ -53,77 +218,63 @@ local Theme = {
 
 -- ===================== SETTINGS =====================
 local Settings = {
-    -- Farm
-    AutoSteal = false,
-    AutoStealDelay = 0.1,
+    AutoCollectEggs = false,
     AutoHatch = false,
-    AutoHatchDelay = 0.5,
-    AutoCollect = false,
-    AutoDeleteLow = false,
-    DeleteRarity = "Common",
-    -- Teleport
-    SelectedArea = nil,
-    -- Player
-    SpeedEnabled = false,
-    SpeedValue = 80,
-    FlyEnabled = false,
-    FlySpeed = 60,
-    InfJump = false,
-    Noclip = false,
-    JumpPower = 50,
-    -- ESP
+    AutoSellPets = false,
+    AutoWearBest = false,
     EggESP = false,
-    ChestESP = false,
     PlayerESP = false,
     Fullbright = false,
-    -- Misc
+    SpeedEnabled = false,
+    SpeedValue = 40, -- dusuk deger = daha guvenli
+    FlyEnabled = false,
+    FlySpeed = 50,
+    InfJump = false,
+    Noclip = false,
     AntiAFK = true,
-    AutoReconnect = false,
-    FPSBoost = false,
 }
 
--- ===================== CLEANUP OLD =====================
+-- ===================== CLEANUP OLD GUI =====================
 for _, loc in ipairs({game:GetService("CoreGui"), LocalPlayer:FindFirstChild("PlayerGui")}) do
     pcall(function()
-        local o = loc:FindFirstChild("EggHunterHub"); if o then o:Destroy() end
+        local o = loc:FindFirstChild("EggHunterV2"); if o then o:Destroy() end
     end)
 end
 pcall(function()
     if gethui then
-        local o = gethui():FindFirstChild("EggHunterHub"); if o then o:Destroy() end
+        local o = gethui():FindFirstChild("EggHunterV2"); if o then o:Destroy() end
     end
 end)
 
 -- ===================== TWEEN HELPER =====================
-local function tween(obj, time, props, style, dir)
-    local info = TweenInfo.new(time or 0.2, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out)
-    local t = TweenService:Create(obj, info, props)
+local function tween(obj, time, props)
+    local t = TweenService:Create(obj, TweenInfo.new(time or 0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
     t:Play()
     return t
 end
 
--- ===================== SCREENGUI =====================
+-- ===================== CREATE GUI =====================
 local guiParent = getGuiParent()
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "EggHunterHub"
+ScreenGui.Name = "EggHunterV2"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.DisplayOrder = 999
 ScreenGui.IgnoreGuiInset = true
 if guiParent:IsA("ScreenGui") then
     ScreenGui = guiParent
-    ScreenGui.Name = "EggHunterHub"
+    ScreenGui.Name = "EggHunterV2"
     ScreenGui.ResetOnSpawn = false
     ScreenGui.DisplayOrder = 999
 else
     ScreenGui.Parent = guiParent
 end
 
--- ===================== MAIN FRAME =====================
+-- Main Frame
 local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
-MainFrame.Size = UDim2.new(0, 680, 0, 460)
-MainFrame.Position = UDim2.new(0.5, -340, 0.5, -230)
+MainFrame.Size = UDim2.new(0, 520, 0, 420)
+MainFrame.Position = UDim2.new(0.5, -260, 0.5, -210)
 MainFrame.BackgroundColor3 = Theme.Bg
 MainFrame.BorderSizePixel = 0
 MainFrame.Visible = true
@@ -134,21 +285,17 @@ Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
 local mainStroke = Instance.new("UIStroke", MainFrame)
 mainStroke.Color = Theme.Primary
 mainStroke.Thickness = 1.5
-mainStroke.Transparency = 0.4
+mainStroke.Transparency = 0.3
 
--- ===================== TOP BAR =====================
+-- Top Bar
 local TopBar = Instance.new("Frame")
-TopBar.Name = "TopBar"
-TopBar.Size = UDim2.new(1, 0, 0, 42)
+TopBar.Size = UDim2.new(1, 0, 0, 38)
 TopBar.BackgroundColor3 = Theme.Panel
 TopBar.BorderSizePixel = 0
 TopBar.ZIndex = 10
 TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
 
-local topCorner = Instance.new("UICorner", TopBar)
-topCorner.CornerRadius = UDim.new(0, 8)
-
--- alt koseyi duzelt
 local topFill = Instance.new("Frame")
 topFill.Size = UDim2.new(1, 0, 0, 10)
 topFill.Position = UDim2.new(0, 0, 1, -10)
@@ -159,77 +306,58 @@ topFill.Parent = TopBar
 
 local titleLbl = Instance.new("TextLabel")
 titleLbl.Size = UDim2.new(0, 300, 1, 0)
-titleLbl.Position = UDim2.new(0, 16, 0, 0)
+titleLbl.Position = UDim2.new(0, 14, 0, 0)
 titleLbl.BackgroundTransparency = 1
-titleLbl.Text = "EGG HUNTER HUB"
+titleLbl.Text = "EGG HUNTER v2"
 titleLbl.TextColor3 = Theme.Primary
-titleLbl.TextSize = 16
+titleLbl.TextSize = 15
 titleLbl.Font = Enum.Font.GothamBold
 titleLbl.TextXAlignment = Enum.TextXAlignment.Left
 titleLbl.ZIndex = 11
 titleLbl.Parent = TopBar
 
-local subtitleLbl = Instance.new("TextLabel")
-subtitleLbl.Size = UDim2.new(0, 300, 1, 0)
-subtitleLbl.Position = UDim2.new(0, 175, 0, 1)
-subtitleLbl.BackgroundTransparency = 1
-subtitleLbl.Text = "| Steal An Egg"
-subtitleLbl.TextColor3 = Theme.SubText
-subtitleLbl.TextSize = 12
-subtitleLbl.Font = Enum.Font.Gotham
-subtitleLbl.TextXAlignment = Enum.TextXAlignment.Left
-subtitleLbl.ZIndex = 11
-subtitleLbl.Parent = TopBar
+local bypassLbl = Instance.new("TextLabel")
+bypassLbl.Size = UDim2.new(0, 200, 1, 0)
+bypassLbl.Position = UDim2.new(0, 150, 0, 0)
+bypassLbl.BackgroundTransparency = 1
+bypassLbl.Text = bypassResult and "| Bypass: AKTIF" or "| Bypass: PASIF"
+bypassLbl.TextColor3 = bypassResult and Theme.Success or Theme.Error
+bypassLbl.TextSize = 11
+bypassLbl.Font = Enum.Font.Gotham
+bypassLbl.TextXAlignment = Enum.TextXAlignment.Left
+bypassLbl.ZIndex = 11
+bypassLbl.Parent = TopBar
 
--- Minimize & Close buttons
+-- Close button
 local closeBtn = Instance.new("TextButton")
-closeBtn.Size = UDim2.new(0, 30, 0, 30)
-closeBtn.Position = UDim2.new(1, -38, 0, 6)
+closeBtn.Size = UDim2.new(0, 28, 0, 28)
+closeBtn.Position = UDim2.new(1, -34, 0, 5)
 closeBtn.BackgroundColor3 = Theme.Error
 closeBtn.BackgroundTransparency = 0.8
 closeBtn.BorderSizePixel = 0
 closeBtn.Text = "x"
 closeBtn.TextColor3 = Theme.Error
-closeBtn.TextSize = 16
+closeBtn.TextSize = 14
 closeBtn.Font = Enum.Font.GothamBold
 closeBtn.AutoButtonColor = false
 closeBtn.ZIndex = 12
 closeBtn.Parent = TopBar
 Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+closeBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = false
+end)
 
-local minimizeBtn = Instance.new("TextButton")
-minimizeBtn.Size = UDim2.new(0, 30, 0, 30)
-minimizeBtn.Position = UDim2.new(1, -72, 0, 6)
-minimizeBtn.BackgroundColor3 = Theme.Primary
-minimizeBtn.BackgroundTransparency = 0.8
-minimizeBtn.BorderSizePixel = 0
-minimizeBtn.Text = "_"
-minimizeBtn.TextColor3 = Theme.Primary
-minimizeBtn.TextSize = 16
-minimizeBtn.Font = Enum.Font.GothamBold
-minimizeBtn.AutoButtonColor = false
-minimizeBtn.ZIndex = 12
-minimizeBtn.Parent = TopBar
-Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 6)
-
--- ===================== DRAG =====================
+-- Drag
 local function makeDraggable(frame, handle)
     local dragging, dragInput, dragStart, startPos
-    handle = handle or frame
     handle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = frame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
+            dragging = true; dragStart = input.Position; startPos = frame.Position
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
         end
     end)
     handle.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput = input
-        end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
     end)
     UserInputService.InputChanged:Connect(function(input)
         if input == dragInput and dragging then
@@ -240,137 +368,52 @@ local function makeDraggable(frame, handle)
 end
 makeDraggable(MainFrame, TopBar)
 
--- ===================== BODY (Sidebar + Content) =====================
-local BodyFrame = Instance.new("Frame")
-BodyFrame.Name = "Body"
-BodyFrame.Size = UDim2.new(1, 0, 1, -42)
-BodyFrame.Position = UDim2.new(0, 0, 0, 42)
-BodyFrame.BackgroundTransparency = 1
-BodyFrame.ZIndex = 3
-BodyFrame.Parent = MainFrame
+-- ===================== TAB SYSTEM =====================
+local TabBar = Instance.new("Frame")
+TabBar.Size = UDim2.new(1, -16, 0, 30)
+TabBar.Position = UDim2.new(0, 8, 0, 42)
+TabBar.BackgroundTransparency = 1
+TabBar.ZIndex = 8
+TabBar.Parent = MainFrame
 
--- Sidebar
-local Sidebar = Instance.new("Frame")
-Sidebar.Name = "Sidebar"
-Sidebar.Size = UDim2.new(0, 145, 1, -10)
-Sidebar.Position = UDim2.new(0, 5, 0, 5)
-Sidebar.BackgroundColor3 = Theme.Panel
-Sidebar.BorderSizePixel = 0
-Sidebar.ZIndex = 5
-Sidebar.Parent = BodyFrame
-Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 6)
+local tabBarLayout = Instance.new("UIListLayout", TabBar)
+tabBarLayout.FillDirection = Enum.FillDirection.Horizontal
+tabBarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tabBarLayout.Padding = UDim.new(0, 4)
 
-local SideScroll = Instance.new("ScrollingFrame")
-SideScroll.Size = UDim2.new(1, -8, 1, -8)
-SideScroll.Position = UDim2.new(0, 4, 0, 4)
-SideScroll.BackgroundTransparency = 1
-SideScroll.BorderSizePixel = 0
-SideScroll.ScrollBarThickness = 2
-SideScroll.ScrollBarImageColor3 = Theme.Primary
-SideScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-SideScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-SideScroll.ZIndex = 6
-SideScroll.Parent = Sidebar
-
-local sideLayout = Instance.new("UIListLayout", SideScroll)
-sideLayout.SortOrder = Enum.SortOrder.LayoutOrder
-sideLayout.Padding = UDim.new(0, 3)
-
--- Content Area
 local ContentArea = Instance.new("Frame")
-ContentArea.Name = "ContentArea"
-ContentArea.Size = UDim2.new(1, -160, 1, -10)
-ContentArea.Position = UDim2.new(0, 155, 0, 5)
+ContentArea.Size = UDim2.new(1, -16, 1, -82)
+ContentArea.Position = UDim2.new(0, 8, 0, 76)
 ContentArea.BackgroundTransparency = 1
 ContentArea.ClipsDescendants = true
 ContentArea.ZIndex = 3
-ContentArea.Parent = BodyFrame
+ContentArea.Parent = MainFrame
 
--- ===================== TAB SYSTEM =====================
-local tabConfig = {
-    {Name = "FARM",     Icon = "E", Sub = "Auto Steal & Hatch"},
-    {Name = "TELEPORT", Icon = "T", Sub = "Area Teleport"},
-    {Name = "PLAYER",   Icon = "P", Sub = "Movement Hacks"},
-    {Name = "VISUALS",  Icon = "V", Sub = "ESP & Display"},
-    {Name = "MISC",     Icon = "M", Sub = "Utilities"},
-    {Name = "INFO",     Icon = "i", Sub = "Game Scanner"},
-}
-
+local tabs = {"Farm", "Pets", "Movement", "Visuals", "Misc"}
 local tabPages = {}
-local tabButtons = {}
-local activeTab = "FARM"
+local tabBtns = {}
+local activeTab = "Farm"
 
-for i, config in ipairs(tabConfig) do
-    -- Tab button
+for i, name in ipairs(tabs) do
     local btn = Instance.new("TextButton")
-    btn.Name = "Tab_" .. config.Name
-    btn.Size = UDim2.new(1, 0, 0, 38)
+    btn.Name = "Tab_" .. name
+    btn.Size = UDim2.new(0, 95, 0, 26)
     btn.BackgroundColor3 = Theme.Button
-    btn.BackgroundTransparency = 1
+    btn.BackgroundTransparency = 0.3
     btn.BorderSizePixel = 0
-    btn.Text = ""
+    btn.Text = name
+    btn.TextColor3 = Theme.SubText
+    btn.TextSize = 12
+    btn.Font = Enum.Font.GothamMed
     btn.AutoButtonColor = false
     btn.LayoutOrder = i
-    btn.ZIndex = 7
-    btn.Parent = SideScroll
+    btn.ZIndex = 9
+    btn.Parent = TabBar
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+    tabBtns[name] = btn
 
-    local indicator = Instance.new("Frame")
-    indicator.Name = "Indicator"
-    indicator.Size = UDim2.new(0, 3, 0, 0)
-    indicator.Position = UDim2.new(0, 0, 0.5, 0)
-    indicator.AnchorPoint = Vector2.new(0, 0.5)
-    indicator.BackgroundColor3 = Theme.Primary
-    indicator.BorderSizePixel = 0
-    indicator.Visible = false
-    indicator.ZIndex = 9
-    indicator.Parent = btn
-    Instance.new("UICorner", indicator).CornerRadius = UDim.new(1, 0)
-
-    local iconLbl = Instance.new("TextLabel")
-    iconLbl.Name = "Icon"
-    iconLbl.Size = UDim2.new(0, 24, 0, 24)
-    iconLbl.Position = UDim2.new(0, 8, 0.5, -12)
-    iconLbl.BackgroundColor3 = Theme.Primary
-    iconLbl.BackgroundTransparency = 0.85
-    iconLbl.Text = config.Icon
-    iconLbl.TextColor3 = Theme.Primary
-    iconLbl.TextSize = 11
-    iconLbl.Font = Enum.Font.GothamBold
-    iconLbl.ZIndex = 8
-    iconLbl.Parent = btn
-    Instance.new("UICorner", iconLbl).CornerRadius = UDim.new(0, 5)
-
-    local nameLbl = Instance.new("TextLabel")
-    nameLbl.Name = "NameLabel"
-    nameLbl.Size = UDim2.new(1, -42, 0, 16)
-    nameLbl.Position = UDim2.new(0, 38, 0, 5)
-    nameLbl.BackgroundTransparency = 1
-    nameLbl.Text = config.Name:sub(1,1) .. config.Name:sub(2):lower()
-    nameLbl.TextColor3 = Theme.SubText
-    nameLbl.TextSize = 12
-    nameLbl.Font = Enum.Font.GothamBold
-    nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-    nameLbl.ZIndex = 8
-    nameLbl.Parent = btn
-
-    local subLbl = Instance.new("TextLabel")
-    subLbl.Name = "SubLabel"
-    subLbl.Size = UDim2.new(1, -42, 0, 12)
-    subLbl.Position = UDim2.new(0, 38, 0, 21)
-    subLbl.BackgroundTransparency = 1
-    subLbl.Text = config.Sub
-    subLbl.TextColor3 = Theme.SubText
-    subLbl.TextTransparency = 0.4
-    subLbl.TextSize = 9
-    subLbl.Font = Enum.Font.Gotham
-    subLbl.TextXAlignment = Enum.TextXAlignment.Left
-    subLbl.ZIndex = 8
-    subLbl.Parent = btn
-
-    -- Tab page (scroll)
     local page = Instance.new("ScrollingFrame")
-    page.Name = "Page_" .. config.Name
+    page.Name = "Page_" .. name
     page.Size = UDim2.new(1, 0, 1, 0)
     page.BackgroundTransparency = 1
     page.BorderSizePixel = 0
@@ -382,58 +425,31 @@ for i, config in ipairs(tabConfig) do
     page.ZIndex = 4
     page.Parent = ContentArea
 
-    local pageLayout = Instance.new("UIListLayout", page)
-    pageLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    pageLayout.Padding = UDim.new(0, 5)
-    Instance.new("UIPadding", page).PaddingTop = UDim.new(0, 4)
+    local layout = Instance.new("UIListLayout", page)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 4)
 
-    tabPages[config.Name] = page
-    tabButtons[config.Name] = {Button = btn, Indicator = indicator, NameLabel = nameLbl}
-
-    btn.MouseEnter:Connect(function()
-        if activeTab ~= config.Name then
-            tween(btn, 0.15, {BackgroundTransparency = 0.7})
-        end
-    end)
-    btn.MouseLeave:Connect(function()
-        if activeTab ~= config.Name then
-            tween(btn, 0.15, {BackgroundTransparency = 1})
-        end
-    end)
+    tabPages[name] = page
 end
 
 local function switchTab(name)
-    if not tabPages[name] then return end
-    -- deactivate old
-    local oldBtn = tabButtons[activeTab]
-    if oldBtn then
-        tween(oldBtn.Button, 0.2, {BackgroundTransparency = 1})
-        oldBtn.NameLabel.TextColor3 = Theme.SubText
-        oldBtn.Indicator.Visible = false
-        tween(oldBtn.Indicator, 0.15, {Size = UDim2.new(0, 3, 0, 0)})
+    for n, p in pairs(tabPages) do
+        p.Visible = (n == name)
+        tabBtns[n].TextColor3 = (n == name) and Theme.Text or Theme.SubText
+        tabBtns[n].BackgroundTransparency = (n == name) and 0 or 0.3
+        tabBtns[n].BackgroundColor3 = (n == name) and Theme.Primary or Theme.Button
     end
-    if tabPages[activeTab] then tabPages[activeTab].Visible = false end
-
     activeTab = name
-    local newBtn = tabButtons[name]
-    tween(newBtn.Button, 0.2, {BackgroundTransparency = 0.6})
-    newBtn.NameLabel.TextColor3 = Theme.Text
-    newBtn.Indicator.Visible = true
-    tween(newBtn.Indicator, 0.25, {Size = UDim2.new(0, 3, 0, 20)})
-    tabPages[name].Visible = true
 end
 
-for name, data in pairs(tabButtons) do
-    data.Button.MouseButton1Click:Connect(function()
-        switchTab(name)
-    end)
+for name, btn in pairs(tabBtns) do
+    btn.MouseButton1Click:Connect(function() switchTab(name) end)
 end
 
--- ===================== UI BUILDER FUNCTIONS =====================
-
-local function addSectionLabel(parent, text, order)
+-- ===================== UI BUILDERS =====================
+local function addLabel(parent, text, order)
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -10, 0, 24)
+    lbl.Size = UDim2.new(1, 0, 0, 22)
     lbl.BackgroundTransparency = 1
     lbl.Text = "  " .. text
     lbl.TextColor3 = Theme.Primary
@@ -448,7 +464,7 @@ end
 
 local function addToggle(parent, text, default, callback, order)
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, -10, 0, 38)
+    frame.Size = UDim2.new(1, 0, 0, 34)
     frame.BackgroundColor3 = Theme.Card
     frame.BorderSizePixel = 0
     frame.LayoutOrder = order or 0
@@ -457,8 +473,8 @@ local function addToggle(parent, text, default, callback, order)
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
 
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -70, 1, 0)
-    lbl.Position = UDim2.new(0, 14, 0, 0)
+    lbl.Size = UDim2.new(1, -65, 1, 0)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = text
     lbl.TextColor3 = Theme.Text
@@ -469,22 +485,22 @@ local function addToggle(parent, text, default, callback, order)
     lbl.Parent = frame
 
     local toggleBg = Instance.new("Frame")
-    toggleBg.Size = UDim2.new(0, 42, 0, 22)
-    toggleBg.Position = UDim2.new(1, -56, 0.5, -11)
+    toggleBg.Size = UDim2.new(0, 38, 0, 20)
+    toggleBg.Position = UDim2.new(1, -50, 0.5, -10)
     toggleBg.BackgroundColor3 = default and Theme.Enabled or Theme.Disabled
     toggleBg.BorderSizePixel = 0
     toggleBg.ZIndex = 7
     toggleBg.Parent = frame
     Instance.new("UICorner", toggleBg).CornerRadius = UDim.new(1, 0)
 
-    local toggleCircle = Instance.new("Frame")
-    toggleCircle.Size = UDim2.new(0, 16, 0, 16)
-    toggleCircle.Position = default and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
-    toggleCircle.BackgroundColor3 = Color3.new(1, 1, 1)
-    toggleCircle.BorderSizePixel = 0
-    toggleCircle.ZIndex = 8
-    toggleCircle.Parent = toggleBg
-    Instance.new("UICorner", toggleCircle).CornerRadius = UDim.new(1, 0)
+    local circle = Instance.new("Frame")
+    circle.Size = UDim2.new(0, 14, 0, 14)
+    circle.Position = default and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+    circle.BackgroundColor3 = Color3.new(1, 1, 1)
+    circle.BorderSizePixel = 0
+    circle.ZIndex = 8
+    circle.Parent = toggleBg
+    Instance.new("UICorner", circle).CornerRadius = UDim.new(1, 0)
 
     local state = default
     local btn = Instance.new("TextButton")
@@ -496,25 +512,16 @@ local function addToggle(parent, text, default, callback, order)
 
     btn.MouseButton1Click:Connect(function()
         state = not state
-        tween(toggleBg, 0.25, {BackgroundColor3 = state and Theme.Enabled or Theme.Disabled})
-        tween(toggleCircle, 0.25, {Position = state and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)})
+        tween(toggleBg, 0.2, {BackgroundColor3 = state and Theme.Enabled or Theme.Disabled})
+        tween(circle, 0.2, {Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)})
         if callback then callback(state) end
     end)
-
-    return {
-        Frame = frame,
-        SetState = function(val)
-            state = val
-            tween(toggleBg, 0.2, {BackgroundColor3 = val and Theme.Enabled or Theme.Disabled})
-            tween(toggleCircle, 0.2, {Position = val and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)})
-        end,
-        GetState = function() return state end,
-    }
+    return frame
 end
 
 local function addSlider(parent, text, min, max, default, callback, order)
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, -10, 0, 50)
+    frame.Size = UDim2.new(1, 0, 0, 46)
     frame.BackgroundColor3 = Theme.Card
     frame.BorderSizePixel = 0
     frame.LayoutOrder = order or 0
@@ -523,20 +530,20 @@ local function addSlider(parent, text, min, max, default, callback, order)
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
 
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -70, 0, 22)
-    lbl.Position = UDim2.new(0, 14, 0, 4)
+    lbl.Size = UDim2.new(1, -60, 0, 20)
+    lbl.Position = UDim2.new(0, 12, 0, 3)
     lbl.BackgroundTransparency = 1
     lbl.Text = text
     lbl.TextColor3 = Theme.Text
-    lbl.TextSize = 12
+    lbl.TextSize = 11
     lbl.Font = Enum.Font.GothamMed
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.ZIndex = 6
     lbl.Parent = frame
 
     local valLbl = Instance.new("TextLabel")
-    valLbl.Size = UDim2.new(0, 50, 0, 22)
-    valLbl.Position = UDim2.new(1, -60, 0, 4)
+    valLbl.Size = UDim2.new(0, 45, 0, 20)
+    valLbl.Position = UDim2.new(1, -52, 0, 3)
     valLbl.BackgroundTransparency = 1
     valLbl.Text = tostring(default)
     valLbl.TextColor3 = Theme.Primary
@@ -547,16 +554,16 @@ local function addSlider(parent, text, min, max, default, callback, order)
     valLbl.Parent = frame
 
     local sliderBg = Instance.new("Frame")
-    sliderBg.Size = UDim2.new(1, -28, 0, 6)
-    sliderBg.Position = UDim2.new(0, 14, 0, 34)
+    sliderBg.Size = UDim2.new(1, -24, 0, 5)
+    sliderBg.Position = UDim2.new(0, 12, 0, 30)
     sliderBg.BackgroundColor3 = Theme.Disabled
     sliderBg.BorderSizePixel = 0
     sliderBg.ZIndex = 7
     sliderBg.Parent = frame
     Instance.new("UICorner", sliderBg).CornerRadius = UDim.new(1, 0)
 
-    local sliderFill = Instance.new("Frame")
     local pct = (default - min) / (max - min)
+    local sliderFill = Instance.new("Frame")
     sliderFill.Size = UDim2.new(pct, 0, 1, 0)
     sliderFill.BackgroundColor3 = Theme.Primary
     sliderFill.BorderSizePixel = 0
@@ -564,59 +571,48 @@ local function addSlider(parent, text, min, max, default, callback, order)
     sliderFill.Parent = sliderBg
     Instance.new("UICorner", sliderFill).CornerRadius = UDim.new(1, 0)
 
-    local sliderKnob = Instance.new("Frame")
-    sliderKnob.Size = UDim2.new(0, 14, 0, 14)
-    sliderKnob.Position = UDim2.new(pct, -7, 0.5, -7)
-    sliderKnob.BackgroundColor3 = Color3.new(1, 1, 1)
-    sliderKnob.BorderSizePixel = 0
-    sliderKnob.ZIndex = 9
-    sliderKnob.Parent = sliderBg
-    Instance.new("UICorner", sliderKnob).CornerRadius = UDim.new(1, 0)
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 12, 0, 12)
+    knob.Position = UDim2.new(pct, -6, 0.5, -6)
+    knob.BackgroundColor3 = Color3.new(1, 1, 1)
+    knob.BorderSizePixel = 0
+    knob.ZIndex = 9
+    knob.Parent = sliderBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
 
     local sliderBtn = Instance.new("TextButton")
-    sliderBtn.Size = UDim2.new(1, 10, 0, 20)
-    sliderBtn.Position = UDim2.new(0, -5, 0, -7)
+    sliderBtn.Size = UDim2.new(1, 8, 0, 18)
+    sliderBtn.Position = UDim2.new(0, -4, 0, -6)
     sliderBtn.BackgroundTransparency = 1
     sliderBtn.Text = ""
     sliderBtn.ZIndex = 10
     sliderBtn.Parent = sliderBg
 
     local sliding = false
-    local function updateSlider(input)
-        local absX = sliderBg.AbsolutePosition.X
-        local absW = sliderBg.AbsoluteSize.X
-        local rel = math.clamp((input.Position.X - absX) / absW, 0, 1)
+    local function update(input)
+        local rel = math.clamp((input.Position.X - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1)
         local val = math.floor(min + (max - min) * rel)
         valLbl.Text = tostring(val)
         sliderFill.Size = UDim2.new(rel, 0, 1, 0)
-        sliderKnob.Position = UDim2.new(rel, -7, 0.5, -7)
+        knob.Position = UDim2.new(rel, -6, 0.5, -6)
         if callback then callback(val) end
     end
-
     sliderBtn.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            sliding = true
-            updateSlider(input)
-        end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then sliding = true; update(input) end
     end)
     sliderBtn.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            sliding = false
-        end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then sliding = false end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            updateSlider(input)
-        end
+        if sliding and input.UserInputType == Enum.UserInputType.MouseMovement then update(input) end
     end)
-
     return frame
 end
 
-local function addButton(parent, text, callback, order)
+local function addButton(parent, text, callback, order, color)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -10, 0, 36)
-    btn.BackgroundColor3 = Theme.Button
+    btn.Size = UDim2.new(1, 0, 0, 32)
+    btn.BackgroundColor3 = color or Theme.Button
     btn.BorderSizePixel = 0
     btn.Text = text
     btn.TextColor3 = Theme.Text
@@ -627,363 +623,250 @@ local function addButton(parent, text, callback, order)
     btn.ZIndex = 6
     btn.Parent = parent
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-
-    btn.MouseEnter:Connect(function()
-        tween(btn, 0.15, {BackgroundColor3 = Theme.ButtonHover})
-    end)
-    btn.MouseLeave:Connect(function()
-        tween(btn, 0.15, {BackgroundColor3 = Theme.Button})
-    end)
+    btn.MouseEnter:Connect(function() tween(btn, 0.1, {BackgroundColor3 = Theme.ButtonHover}) end)
+    btn.MouseLeave:Connect(function() tween(btn, 0.1, {BackgroundColor3 = color or Theme.Button}) end)
     btn.MouseButton1Click:Connect(function()
-        tween(btn, 0.1, {BackgroundColor3 = Theme.Primary})
-        task.delay(0.15, function()
-            tween(btn, 0.15, {BackgroundColor3 = Theme.Button})
-        end)
         if callback then callback() end
     end)
     return btn
 end
 
-local function addInfoLabel(parent, text, order)
+local function addInfo(parent, text, order)
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -10, 0, 28)
-    lbl.BackgroundColor3 = Theme.Card
-    lbl.BorderSizePixel = 0
+    lbl.Size = UDim2.new(1, 0, 0, 22)
+    lbl.BackgroundTransparency = 1
     lbl.Text = "  " .. text
     lbl.TextColor3 = Theme.SubText
-    lbl.TextSize = 11
+    lbl.TextSize = 10
     lbl.Font = Enum.Font.Gotham
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.LayoutOrder = order or 0
     lbl.ZIndex = 5
     lbl.Parent = parent
-    Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 5)
     return lbl
 end
 
--- ===================== TOAST SYSTEM =====================
+-- ===================== TOAST =====================
 local toastContainer = Instance.new("Frame")
-toastContainer.Size = UDim2.new(0, 280, 0, 200)
-toastContainer.Position = UDim2.new(1, -290, 1, -210)
+toastContainer.Size = UDim2.new(0, 260, 0, 200)
+toastContainer.Position = UDim2.new(1, -270, 1, -210)
 toastContainer.BackgroundTransparency = 1
 toastContainer.ZIndex = 50
 toastContainer.Parent = ScreenGui
-
 local toastLayout = Instance.new("UIListLayout", toastContainer)
 toastLayout.SortOrder = Enum.SortOrder.LayoutOrder
-toastLayout.Padding = UDim.new(0, 4)
+toastLayout.Padding = UDim.new(0, 3)
 toastLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
 
-local function showToast(msg, color, duration)
+local function showToast(msg, color, dur)
     color = color or Theme.Primary
-    duration = duration or 3
-
-    local toast = Instance.new("Frame")
-    toast.Size = UDim2.new(1, 0, 0, 32)
-    toast.BackgroundColor3 = Theme.Panel
-    toast.BorderSizePixel = 0
-    toast.BackgroundTransparency = 1
-    toast.ZIndex = 51
-    toast.Parent = toastContainer
-    Instance.new("UICorner", toast).CornerRadius = UDim.new(0, 6)
-
-    local tStroke = Instance.new("UIStroke", toast)
-    tStroke.Color = color
-    tStroke.Thickness = 1
-    tStroke.Transparency = 0.6
-
-    local tLbl = Instance.new("TextLabel")
-    tLbl.Size = UDim2.new(1, -16, 1, 0)
-    tLbl.Position = UDim2.new(0, 8, 0, 0)
-    tLbl.BackgroundTransparency = 1
-    tLbl.Text = msg
-    tLbl.TextColor3 = Theme.Text
-    tLbl.TextSize = 11
-    tLbl.Font = Enum.Font.GothamMed
-    tLbl.TextXAlignment = Enum.TextXAlignment.Left
-    tLbl.TextTransparency = 1
-    tLbl.ZIndex = 52
-    tLbl.Parent = toast
-
-    tween(toast, 0.3, {BackgroundTransparency = 0.1})
-    tween(tLbl, 0.3, {TextTransparency = 0})
-
-    task.delay(duration, function()
-        tween(toast, 0.4, {BackgroundTransparency = 1})
-        tween(tLbl, 0.4, {TextTransparency = 1})
-        task.delay(0.5, function()
-            toast:Destroy()
-        end)
+    dur = dur or 3
+    local t = Instance.new("Frame")
+    t.Size = UDim2.new(1, 0, 0, 28)
+    t.BackgroundColor3 = Theme.Panel
+    t.BackgroundTransparency = 1
+    t.BorderSizePixel = 0
+    t.ZIndex = 51
+    t.Parent = toastContainer
+    Instance.new("UICorner", t).CornerRadius = UDim.new(0, 5)
+    local s = Instance.new("UIStroke", t)
+    s.Color = color; s.Thickness = 1; s.Transparency = 0.5
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -12, 1, 0)
+    l.Position = UDim2.new(0, 6, 0, 0)
+    l.BackgroundTransparency = 1
+    l.Text = msg
+    l.TextColor3 = Theme.Text
+    l.TextSize = 11
+    l.Font = Enum.Font.GothamMed
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextTransparency = 1
+    l.ZIndex = 52
+    l.Parent = t
+    tween(t, 0.25, {BackgroundTransparency = 0.1})
+    tween(l, 0.25, {TextTransparency = 0})
+    task.delay(dur, function()
+        tween(t, 0.3, {BackgroundTransparency = 1})
+        tween(l, 0.3, {TextTransparency = 1})
+        task.delay(0.4, function() t:Destroy() end)
     end)
 end
 
--- ===================== GAME SCANNER (find objects) =====================
-local gameData = {
-    eggLocations = {},
-    areas = {},
-    remotes = {},
-    prompts = {},
-    chests = {},
-}
-
-local function scanGame()
-    gameData.eggLocations = {}
-    gameData.areas = {}
-    gameData.prompts = {}
-    gameData.chests = {}
-
-    -- Egg ve Nest arama
-    local function searchForEggs(parent, depth)
-        if depth > 6 then return end
-        for _, child in ipairs(parent:GetChildren()) do
-            local n = child.Name:lower()
-            if (n:find("egg") or n:find("nest") or n:find("steal")) and child:IsA("BasePart") then
-                table.insert(gameData.eggLocations, child)
-            end
-            if (n:find("egg") or n:find("nest") or n:find("steal")) and child:IsA("Model") then
-                table.insert(gameData.eggLocations, child)
-            end
-            -- ProximityPrompt bul
-            local prompt = child:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then
-                table.insert(gameData.prompts, {Object = child, Prompt = prompt})
-            end
-            -- Chest/kutu ara
-            if (n:find("chest") or n:find("reward") or n:find("gift") or n:find("crate") or n:find("loot")) then
-                table.insert(gameData.chests, child)
-            end
-            -- Area/Biome ara
-            if (n:find("area") or n:find("biome") or n:find("zone") or n:find("world") or n:find("island") or n:find("dimension") or n:find("realm")) then
-                if child:IsA("Model") or child:IsA("Folder") or child:IsA("BasePart") then
-                    table.insert(gameData.areas, child)
-                end
-            end
-            pcall(function() searchForEggs(child, depth + 1) end)
-        end
-    end
-
-    pcall(function() searchForEggs(workspace, 0) end)
-
-    -- Remote event/function tara
-    gameData.remotes = {}
-    local function scanRemotes(parent)
-        for _, child in ipairs(parent:GetChildren()) do
-            if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
-                local n = child.Name:lower()
-                if n:find("egg") or n:find("hatch") or n:find("steal") or n:find("collect")
-                    or n:find("buy") or n:find("open") or n:find("claim") or n:find("pet")
-                    or n:find("sell") or n:find("delete") or n:find("equip") then
-                    table.insert(gameData.remotes, {Name = child.Name, Type = child.ClassName, Object = child})
-                end
-            end
-            pcall(function() scanRemotes(child) end)
-        end
-    end
-    pcall(function() scanRemotes(ReplicatedStorage) end)
-
-    return gameData
-end
-
-scanGame()
-
 -- ===================== TAB: FARM =====================
-local farmPage = tabPages["FARM"]
+local farmPage = tabPages["Farm"]
 
-addSectionLabel(farmPage, "EGG STEALING", 1)
+addLabel(farmPage, "EGG FARMING", 1)
+addInfo(farmPage, "Yakinindaki yumurtalari otomatik toplar", 2)
 
-addToggle(farmPage, "Auto Steal (ProximityPrompt)", false, function(val)
-    Settings.AutoSteal = val
-    showToast(val and "Auto Steal: ON" or "Auto Steal: OFF", val and Theme.Success or Theme.Error)
-end, 2)
-
-addSlider(farmPage, "Steal Delay (saniye)", 0, 2, 0.1, function(val)
-    Settings.AutoStealDelay = val / 10
+addToggle(farmPage, "Auto Collect Eggs (Yakin Mesafe)", false, function(val)
+    Settings.AutoCollectEggs = val
+    showToast(val and "Auto Collect: ON" or "Auto Collect: OFF", val and Theme.Success or Theme.Error)
 end, 3)
 
-addToggle(farmPage, "Auto Teleport to Eggs", false, function(val)
-    Settings.AutoTeleportEgg = val
-    showToast(val and "Auto TP Egg: ON" or "Auto TP Egg: OFF", val and Theme.Success or Theme.Error)
-end, 4)
-
-addSectionLabel(farmPage, "HATCHING", 5)
-
-addToggle(farmPage, "Auto Hatch", false, function(val)
+addToggle(farmPage, "Auto Hatch (Otomatik Kir)", false, function(val)
     Settings.AutoHatch = val
     showToast(val and "Auto Hatch: ON" or "Auto Hatch: OFF", val and Theme.Success or Theme.Error)
-end, 6)
-
-addSlider(farmPage, "Hatch Delay (ms)", 100, 2000, 500, function(val)
-    Settings.AutoHatchDelay = val / 1000
-end, 7)
-
-addSectionLabel(farmPage, "COLLECTION", 8)
-
-addToggle(farmPage, "Auto Collect Items", false, function(val)
-    Settings.AutoCollect = val
-    showToast(val and "Auto Collect: ON" or "Auto Collect: OFF", val and Theme.Success or Theme.Error)
-end, 9)
-
-addToggle(farmPage, "Auto Open Chests", false, function(val)
-    Settings.AutoChest = val
-    showToast(val and "Auto Chest: ON" or "Auto Chest: OFF", val and Theme.Success or Theme.Error)
-end, 10)
-
-addButton(farmPage, "Rescan Game Objects", function()
-    scanGame()
-    showToast("Scan: " .. #gameData.eggLocations .. " egg, " .. #gameData.prompts .. " prompt, " .. #gameData.chests .. " chest", Theme.Primary, 4)
-end, 11)
-
--- ===================== TAB: TELEPORT =====================
-local tpPage = tabPages["TELEPORT"]
-
-addSectionLabel(tpPage, "AREA TELEPORT", 1)
-addInfoLabel(tpPage, "Bulunan alanlar asagida listelenir", 2)
-
-local function refreshAreaButtons()
-    -- Eski butonlari sil (layout order > 10)
-    for _, child in ipairs(tpPage:GetChildren()) do
-        if child:IsA("TextButton") and child.LayoutOrder >= 10 then
-            child:Destroy()
-        end
-    end
-
-    local order = 10
-    for _, area in ipairs(gameData.areas) do
-        addButton(tpPage, "TP: " .. area.Name, function()
-            local char = LocalPlayer.Character
-            if not char then return end
-            local root = char:FindFirstChild("HumanoidRootPart")
-            if not root then return end
-            local target
-            if area:IsA("Model") then
-                target = area:FindFirstChild("HumanoidRootPart") or area.PrimaryPart or area:FindFirstChildWhichIsA("BasePart")
-            elseif area:IsA("BasePart") then
-                target = area
-            end
-            if target then
-                root.CFrame = target.CFrame + Vector3.new(0, 5, 0)
-                showToast("Teleported: " .. area.Name, Theme.Success)
-            else
-                showToast("TP basarisiz: part bulunamadi", Theme.Error)
-            end
-        end, order)
-        order = order + 1
-    end
-
-    if #gameData.areas == 0 then
-        addInfoLabel(tpPage, "Hic alan bulunamadi - Rescan deneyin", order)
-    end
-end
-refreshAreaButtons()
-
-addSectionLabel(tpPage, "QUICK TELEPORT", 3)
-
-addButton(tpPage, "TP: Spawn / Lobby", function()
-    local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
-    -- spawn noktasina teleport
-    local spawn = workspace:FindFirstChildOfClass("SpawnLocation")
-    if spawn then
-        char.HumanoidRootPart.CFrame = spawn.CFrame + Vector3.new(0, 5, 0)
-        showToast("Teleported to Spawn", Theme.Success)
-    else
-        char.HumanoidRootPart.CFrame = CFrame.new(0, 50, 0)
-        showToast("Teleported to Origin", Theme.Success)
-    end
 end, 4)
 
-addButton(tpPage, "TP: En Yakin Egg", function()
-    local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
-    local root = char.HumanoidRootPart
-    local closest, dist = nil, math.huge
-    for _, egg in ipairs(gameData.eggLocations) do
-        pcall(function()
-            local pos
-            if egg:IsA("Model") then
-                local p = egg.PrimaryPart or egg:FindFirstChildWhichIsA("BasePart")
-                if p then pos = p.Position end
-            elseif egg:IsA("BasePart") then
-                pos = egg.Position
-            end
-            if pos then
-                local d = (pos - root.Position).Magnitude
-                if d < dist then dist = d; closest = pos end
-            end
+addLabel(farmPage, "HALLOWEEN DIMENSION", 5)
+
+addButton(farmPage, "Halloween Egg Satin Al", function()
+    if Remotes.HalloweenBuyEgg then
+        local ok, result = pcall(function()
+            return Remotes.HalloweenBuyEgg:InvokeServer()
         end)
-    end
-    if closest then
-        root.CFrame = CFrame.new(closest + Vector3.new(0, 3, 0))
-        showToast("En yakin egg'e teleport edildi (" .. math.floor(dist) .. " stud)", Theme.Success)
+        showToast(ok and "Halloween Egg -> " .. tostring(result) or "Basarisiz", ok and Theme.Success or Theme.Error)
     else
-        showToast("Egg bulunamadi", Theme.Error)
+        showToast("Remote bulunamadi", Theme.Error)
     end
-end, 5)
-
-addButton(tpPage, "Alanlari Yenile", function()
-    scanGame()
-    refreshAreaButtons()
-    showToast("Alanlar yenilendi: " .. #gameData.areas .. " alan", Theme.Primary)
 end, 6)
 
--- ===================== TAB: PLAYER =====================
-local playerPage = tabPages["PLAYER"]
+addLabel(farmPage, "SCRAMBLE (Dr. Scramble)", 7)
 
-addSectionLabel(playerPage, "MOVEMENT", 1)
-
-addToggle(playerPage, "Speed Hack", false, function(val)
-    Settings.SpeedEnabled = val
-    showToast(val and "Speed: ON" or "Speed: OFF", val and Theme.Success or Theme.Error)
-end, 2)
-
-addSlider(playerPage, "Speed Value", 16, 300, 80, function(val)
-    Settings.SpeedValue = val
-end, 3)
-
-addToggle(playerPage, "Fly", false, function(val)
-    Settings.FlyEnabled = val
-    showToast(val and "Fly: ON" or "Fly: OFF", val and Theme.Success or Theme.Error)
-end, 4)
-
-addSlider(playerPage, "Fly Speed", 10, 200, 60, function(val)
-    Settings.FlySpeed = val
-end, 5)
-
-addToggle(playerPage, "Infinite Jump", false, function(val)
-    Settings.InfJump = val
-    showToast(val and "Inf Jump: ON" or "Inf Jump: OFF", val and Theme.Success or Theme.Error)
-end, 6)
-
-addSlider(playerPage, "Jump Power", 20, 200, 50, function(val)
-    Settings.JumpPower = val
-end, 7)
-
-addToggle(playerPage, "Noclip", false, function(val)
-    Settings.Noclip = val
-    showToast(val and "Noclip: ON" or "Noclip: OFF", val and Theme.Success or Theme.Error)
+addButton(farmPage, "Scramble Collect", function()
+    if Remotes.ScrambleCollect then
+        pcall(function() Remotes.ScrambleCollect:FireServer() end)
+        showToast("Scramble Collect gonderildi", Theme.Success)
+    else
+        showToast("Remote bulunamadi", Theme.Error)
+    end
 end, 8)
 
--- ===================== TAB: VISUALS =====================
-local visualPage = tabPages["VISUALS"]
+addLabel(farmPage, "CODEX", 9)
 
-addSectionLabel(visualPage, "ESP", 1)
+addButton(farmPage, "Codex: Redeem All", function()
+    if Remotes.CodexRedeemAll then
+        local ok, result = pcall(function()
+            return Remotes.CodexRedeemAll:InvokeServer()
+        end)
+        showToast(ok and "Codex redeemed!" or "Basarisiz", ok and Theme.Success or Theme.Error)
+    else
+        showToast("Remote bulunamadi", Theme.Error)
+    end
+end, 10)
 
-addToggle(visualPage, "Egg ESP (Highlight)", false, function(val)
-    Settings.EggESP = val
-    showToast(val and "Egg ESP: ON" or "Egg ESP: OFF", val and Theme.Success or Theme.Error)
+-- ===================== TAB: PETS =====================
+local petsPage = tabPages["Pets"]
+
+addLabel(petsPage, "PET YONETIMI", 1)
+
+addToggle(petsPage, "Auto Sell All Pets", false, function(val)
+    Settings.AutoSellPets = val
+    showToast(val and "Auto Sell: ON" or "Auto Sell: OFF", val and Theme.Success or Theme.Error)
 end, 2)
 
-addToggle(visualPage, "Chest ESP (Highlight)", false, function(val)
-    Settings.ChestESP = val
-    showToast(val and "Chest ESP: ON" or "Chest ESP: OFF", val and Theme.Success or Theme.Error)
+addButton(petsPage, "Tum Petleri Sat (Tek Seferlik)", function()
+    if Remotes.SellEveryPet then
+        pcall(function() Remotes.SellEveryPet:FireServer() end)
+        showToast("SellEveryPet gonderildi!", Theme.Success)
+    else
+        showToast("Remote bulunamadi", Theme.Error)
+    end
 end, 3)
+
+addButton(petsPage, "En Iyi Petleri Giy", function()
+    if Remotes.WearBest then
+        local ok, result = pcall(function()
+            return Remotes.WearBest:InvokeServer()
+        end)
+        showToast(ok and "WearBest -> " .. tostring(result) or "Basarisiz", ok and Theme.Success or Theme.Error)
+    else
+        showToast("Remote bulunamadi", Theme.Error)
+    end
+end, 4)
+
+addButton(petsPage, "Auto Sell Ac/Kapa", function()
+    if Remotes.WriteAutoSell then
+        local ok, result = pcall(function()
+            return Remotes.WriteAutoSell:InvokeServer(true)
+        end)
+        showToast(ok and "AutoSell yazildi" or "Basarisiz", ok and Theme.Success or Theme.Error)
+    else
+        showToast("Remote bulunamadi", Theme.Error)
+    end
+end, 5)
+
+addButton(petsPage, "Full Satchel Sale", function()
+    if Remotes.OfferFullSatchelSale then
+        local ok, result = pcall(function()
+            return Remotes.OfferFullSatchelSale:InvokeServer()
+        end)
+        showToast(ok and "Satchel sold!" or "Basarisiz", ok and Theme.Success or Theme.Error)
+    else
+        showToast("Remote bulunamadi", Theme.Error)
+    end
+end, 6)
+
+addLabel(petsPage, "RIFT / TRADE-IN", 7)
+
+addButton(petsPage, "Rift Durumu Sor", function()
+    if Remotes.RiftState then
+        local ok, result = pcall(function()
+            return Remotes.RiftState:InvokeServer()
+        end)
+        if ok then
+            showToast("Rift State: " .. tostring(result), Theme.Primary, 5)
+        else
+            showToast("Basarisiz", Theme.Error)
+        end
+    end
+end, 8)
+
+-- ===================== TAB: MOVEMENT =====================
+local movePage = tabPages["Movement"]
+
+addLabel(movePage, "HIZ (DIKKATLI KULLAN)", 1)
+addInfo(movePage, "Dusuk degerler daha guvenli - Guard algÄ±layabilir!", 2)
+
+addToggle(movePage, "Speed Hack", false, function(val)
+    Settings.SpeedEnabled = val
+    showToast(val and "Speed: ON (dikkat!)" or "Speed: OFF", val and Theme.Success or Theme.Error)
+end, 3)
+
+addSlider(movePage, "Speed Degeri (16=normal)", 16, 100, 40, function(val)
+    Settings.SpeedValue = val
+end, 4)
+
+addLabel(movePage, "UCUS", 5)
+
+addToggle(movePage, "Fly", false, function(val)
+    Settings.FlyEnabled = val
+    showToast(val and "Fly: ON" or "Fly: OFF", val and Theme.Success or Theme.Error)
+end, 6)
+
+addSlider(movePage, "Fly Speed", 10, 150, 50, function(val)
+    Settings.FlySpeed = val
+end, 7)
+
+addLabel(movePage, "DIGER", 8)
+
+addToggle(movePage, "Infinite Jump", false, function(val)
+    Settings.InfJump = val
+    showToast(val and "InfJump: ON" or "InfJump: OFF", val and Theme.Success or Theme.Error)
+end, 9)
+
+addToggle(movePage, "Noclip", false, function(val)
+    Settings.Noclip = val
+    showToast(val and "Noclip: ON" or "Noclip: OFF", val and Theme.Success or Theme.Error)
+end, 10)
+
+-- ===================== TAB: VISUALS =====================
+local visualPage = tabPages["Visuals"]
+
+addLabel(visualPage, "ESP (GUVENLI)", 1)
+addInfo(visualPage, "ESP sadece gorsel - sunucuya veri gondermiyor", 2)
 
 addToggle(visualPage, "Player ESP", false, function(val)
     Settings.PlayerESP = val
     showToast(val and "Player ESP: ON" or "Player ESP: OFF", val and Theme.Success or Theme.Error)
+end, 3)
+
+addToggle(visualPage, "Egg/Nest ESP", false, function(val)
+    Settings.EggESP = val
+    showToast(val and "Egg ESP: ON" or "Egg ESP: OFF", val and Theme.Success or Theme.Error)
 end, 4)
 
-addSectionLabel(visualPage, "DISPLAY", 5)
+addLabel(visualPage, "DISPLAY", 5)
 
 addToggle(visualPage, "Fullbright", false, function(val)
     Settings.Fullbright = val
@@ -992,7 +875,7 @@ addToggle(visualPage, "Fullbright", false, function(val)
         Lighting.ClockTime = 14
         Lighting.FogEnd = 100000
         Lighting.GlobalShadows = false
-        Lighting.Ambient = Color3.fromRGB(178, 178, 178)
+        Lighting.Ambient = Color3.fromRGB(180, 180, 180)
     else
         Lighting.Brightness = 1
         Lighting.GlobalShadows = true
@@ -1001,58 +884,26 @@ addToggle(visualPage, "Fullbright", false, function(val)
     showToast(val and "Fullbright: ON" or "Fullbright: OFF", val and Theme.Success or Theme.Error)
 end, 6)
 
-addToggle(visualPage, "FPS Counter", true, function(val)
-    Settings.FPSCounter = val
-end, 7)
-
 -- ===================== TAB: MISC =====================
-local miscPage = tabPages["MISC"]
+local miscPage = tabPages["Misc"]
 
-addSectionLabel(miscPage, "UTILITIES", 1)
+addLabel(miscPage, "UTILITIES", 1)
 
 addToggle(miscPage, "Anti-AFK", true, function(val)
     Settings.AntiAFK = val
     showToast(val and "Anti-AFK: ON" or "Anti-AFK: OFF", val and Theme.Success or Theme.Error)
 end, 2)
 
-addToggle(miscPage, "Auto Reconnect", false, function(val)
-    Settings.AutoReconnect = val
-    showToast(val and "Auto Reconnect: ON" or "Auto Reconnect: OFF", val and Theme.Success or Theme.Error)
-end, 3)
-
-addToggle(miscPage, "FPS Boost", false, function(val)
-    Settings.FPSBoost = val
-    if val then
-        for _, v in ipairs(workspace:GetDescendants()) do
-            pcall(function()
-                if v:IsA("Decal") or v:IsA("Texture") then
-                    v.Transparency = 1
-                elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Smoke") or v:IsA("Fire") or v:IsA("Sparkles") then
-                    v.Enabled = false
-                end
-            end)
-        end
-        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-        showToast("FPS Boost: Particles/Decals off", Theme.Success)
-    else
-        settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic
-        showToast("FPS Boost: OFF (rejoin for textures)", Theme.Error)
-    end
-end, 4)
-
-addSectionLabel(miscPage, "ACTIONS", 5)
-
 addButton(miscPage, "Rejoin Server", function()
     showToast("Rejoining...", Theme.Primary)
     task.delay(1, function()
         TeleportService:Teleport(game.PlaceId, LocalPlayer)
     end)
-end, 6)
+end, 3)
 
 addButton(miscPage, "Server Hop", function()
-    showToast("Server aranÄ±yor...", Theme.Primary)
+    showToast("Server araniyor...", Theme.Primary)
     task.spawn(function()
-        local servers = {}
         local ok, pages = pcall(function()
             return HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=10"))
         end)
@@ -1064,178 +915,90 @@ addButton(miscPage, "Server Hop", function()
                 end
             end
         end
-        showToast("Uygun server bulunamadi", Theme.Error)
+        showToast("Server bulunamadi", Theme.Error)
     end)
+end, 4)
+
+addLabel(miscPage, "REMOTE SPY (Debug)", 5)
+addInfo(miscPage, "Remote cagrilarini konsola loglar", 6)
+
+local remoteSpyEnabled = false
+addToggle(miscPage, "Remote Spy (Log)", false, function(val)
+    remoteSpyEnabled = val
+    showToast(val and "Remote Spy: ON (konsol)" or "Remote Spy: OFF", val and Theme.Success or Theme.Error)
 end, 7)
 
-addButton(miscPage, "Copy Game ID", function()
-    pcall(function()
-        setclipboard(tostring(game.PlaceId))
-        showToast("Game ID kopyalandi: " .. game.PlaceId, Theme.Success)
-    end)
-end, 8)
+addLabel(miscPage, "BILGI", 8)
 
--- ===================== TAB: INFO (Game Scanner) =====================
-local infoPage = tabPages["INFO"]
-
-addSectionLabel(infoPage, "GAME DATA SCANNER", 1)
-addInfoLabel(infoPage, "Asagidaki butonlarla oyun verilerini tarayin", 2)
-
-local eggCountLabel = addInfoLabel(infoPage, "Eggs found: " .. #gameData.eggLocations, 3)
-local promptCountLabel = addInfoLabel(infoPage, "ProximityPrompts: " .. #gameData.prompts, 4)
-local chestCountLabel = addInfoLabel(infoPage, "Chests: " .. #gameData.chests, 5)
-local areaCountLabel = addInfoLabel(infoPage, "Areas: " .. #gameData.areas, 6)
-local remoteCountLabel = addInfoLabel(infoPage, "Related Remotes: " .. #gameData.remotes, 7)
-
-addButton(infoPage, "Full Rescan", function()
-    scanGame()
-    eggCountLabel.Text = "  Eggs found: " .. #gameData.eggLocations
-    promptCountLabel.Text = "  ProximityPrompts: " .. #gameData.prompts
-    chestCountLabel.Text = "  Chests: " .. #gameData.chests
-    areaCountLabel.Text = "  Areas: " .. #gameData.areas
-    remoteCountLabel.Text = "  Related Remotes: " .. #gameData.remotes
-    refreshAreaButtons()
-    showToast("Full scan tamamlandi!", Theme.Success, 3)
-end, 8)
-
-addSectionLabel(infoPage, "FOUND REMOTES", 9)
-local remoteOrder = 10
-for _, r in ipairs(gameData.remotes) do
-    addInfoLabel(infoPage, "[" .. r.Type .. "] " .. r.Name, remoteOrder)
-    remoteOrder = remoteOrder + 1
-end
-if #gameData.remotes == 0 then
-    addInfoLabel(infoPage, "Henuz remote bulunamadi - Rescan deneyin", remoteOrder)
-end
+local statusText = "Bypass: " .. (bypassResult and "AKTIF" or "PASIF")
+    .. " | Remotes: " .. remoteCount
+    .. " | Executor: " .. (identifyexecutor and identifyexecutor() or "Bilinmiyor")
+addInfo(miscPage, statusText, 9)
 
 -- ===================== FEATURE LOOPS =====================
 
--- FLY SYSTEM (BodyVelocity)
-local flyBV = nil
-local flyBG = nil
-local flyActive = false
-
+-- FLY
+local flyBV, flyBG, flyActive = nil, nil, false
 local function startFly()
     local char = LocalPlayer.Character
     if not char then return end
     local root = char:FindFirstChild("HumanoidRootPart")
     local hum = char:FindFirstChildWhichIsA("Humanoid")
     if not root or not hum then return end
-
     flyActive = true
     hum.PlatformStand = true
-
     flyBV = Instance.new("BodyVelocity")
     flyBV.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-    flyBV.Velocity = Vector3.new(0, 0, 0)
+    flyBV.Velocity = Vector3.zero
     flyBV.Parent = root
-
     flyBG = Instance.new("BodyGyro")
     flyBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    flyBG.D = 200
-    flyBG.P = 9000
+    flyBG.D = 200; flyBG.P = 9000
     flyBG.Parent = root
 end
-
 local function stopFly()
     flyActive = false
-    local char = LocalPlayer.Character
-    if char then
-        local hum = char:FindFirstChildWhichIsA("Humanoid")
+    pcall(function()
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildWhichIsA("Humanoid")
         if hum then hum.PlatformStand = false end
-    end
+    end)
     if flyBV then flyBV:Destroy(); flyBV = nil end
     if flyBG then flyBG:Destroy(); flyBG = nil end
 end
 
--- ESP SYSTEM (Highlight)
-local espHighlights = {}
-
+-- ESP
+local espCache = {}
 local function clearESP()
-    for _, h in pairs(espHighlights) do
-        pcall(function() h:Destroy() end)
+    for k, v in pairs(espCache) do
+        pcall(function() v:Destroy() end)
     end
-    espHighlights = {}
+    espCache = {}
 end
 
-local function addHighlight(obj, color, name)
-    if espHighlights[obj] then return end
-    local hl = Instance.new("Highlight")
-    hl.FillColor = color
-    hl.FillTransparency = 0.6
-    hl.OutlineColor = color
-    hl.OutlineTransparency = 0.2
-    hl.Adornee = obj
-    hl.Parent = obj
-    espHighlights[obj] = hl
-
-    if name then
-        pcall(function()
-            local bb = Instance.new("BillboardGui")
-            bb.Size = UDim2.new(0, 100, 0, 30)
-            bb.StudsOffset = Vector3.new(0, 4, 0)
-            bb.AlwaysOnTop = true
-            bb.Adornee = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
-            bb.Parent = obj
-            local tl = Instance.new("TextLabel")
-            tl.Size = UDim2.new(1, 0, 1, 0)
-            tl.BackgroundTransparency = 1
-            tl.Text = name
-            tl.TextColor3 = color
-            tl.TextSize = 14
-            tl.TextStrokeTransparency = 0.5
-            tl.Font = Enum.Font.GothamBold
-            tl.Parent = bb
-            espHighlights[obj .. "_bb"] = bb
-        end)
-    end
-end
-
--- ANTI-AFK
+-- Anti-AFK
 pcall(function()
     local vu = game:GetService("VirtualUser")
-    Players.LocalPlayer.Idled:Connect(function()
+    LocalPlayer.Idled:Connect(function()
         if Settings.AntiAFK then
-            vu:Button2Down(Vector2.new(0,0), Camera.CFrame)
-            task.delay(0.1, function()
-                vu:Button2Up(Vector2.new(0,0), Camera.CFrame)
-            end)
+            vu:Button2Down(Vector2.new(0, 0), Camera.CFrame)
+            task.delay(0.1, function() vu:Button2Up(Vector2.new(0, 0), Camera.CFrame) end)
         end
     end)
 end)
 
--- INFINITE JUMP
+-- Infinite Jump
 UserInputService.JumpRequest:Connect(function()
     if Settings.InfJump then
-        local char = LocalPlayer.Character
-        if char then
-            local hum = char:FindFirstChildWhichIsA("Humanoid")
-            if hum then
-                hum:ChangeState(Enum.HumanoidStateType.Jumping)
-            end
-        end
+        pcall(function()
+            LocalPlayer.Character:FindFirstChildWhichIsA("Humanoid"):ChangeState(Enum.HumanoidStateType.Jumping)
+        end)
     end
 end)
 
--- ===================== MAIN GAME LOOP =====================
-local fpsCount = 0
-local fpsTime = tick()
-local lastStealTime = 0
+-- ===================== MAIN LOOP =====================
+local lastCollectTime = 0
 local lastHatchTime = 0
-
--- FPS Label
-local fpsLabel = Instance.new("TextLabel")
-fpsLabel.Size = UDim2.new(0, 80, 0, 22)
-fpsLabel.Position = UDim2.new(0, 10, 0, 10)
-fpsLabel.BackgroundColor3 = Theme.Bg
-fpsLabel.BackgroundTransparency = 0.3
-fpsLabel.Text = "FPS: --"
-fpsLabel.TextColor3 = Theme.Primary
-fpsLabel.TextSize = 12
-fpsLabel.Font = Enum.Font.GothamBold
-fpsLabel.ZIndex = 100
-fpsLabel.Parent = ScreenGui
-Instance.new("UICorner", fpsLabel).CornerRadius = UDim.new(0, 4)
+local lastSellTime = 0
 
 RunService.RenderStepped:Connect(function()
     local char = LocalPlayer.Character
@@ -1244,78 +1007,40 @@ RunService.RenderStepped:Connect(function()
     local hum = char:FindFirstChildWhichIsA("Humanoid")
     if not root or not hum then return end
 
-    -- FPS Counter
-    fpsCount = fpsCount + 1
-    if tick() - fpsTime >= 1 then
-        if Settings.FPSCounter ~= false then
-            fpsLabel.Text = "FPS: " .. fpsCount
-            fpsLabel.Visible = true
-        else
-            fpsLabel.Visible = false
-        end
-        fpsCount = 0
-        fpsTime = tick()
-    end
-
-    -- SPEED HACK
+    -- SPEED
     if Settings.SpeedEnabled then
         hum.WalkSpeed = Settings.SpeedValue
     end
 
-    -- JUMP POWER
-    if Settings.InfJump or Settings.JumpPower ~= 50 then
-        hum.JumpPower = Settings.JumpPower
-    end
-
     -- NOCLIP
     if Settings.Noclip then
-        for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = false
-            end
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = false end
         end
     end
 
     -- FLY
     if Settings.FlyEnabled then
-        if not flyActive then
-            startFly()
-        end
+        if not flyActive then startFly() end
         if flyBV and flyBG then
-            local speed = Settings.FlySpeed
-            local moveDir = Vector3.new(0, 0, 0)
-            if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-                moveDir = moveDir + Camera.CFrame.LookVector
-            end
-            if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-                moveDir = moveDir - Camera.CFrame.LookVector
-            end
-            if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-                moveDir = moveDir - Camera.CFrame.RightVector
-            end
-            if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-                moveDir = moveDir + Camera.CFrame.RightVector
-            end
-            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-                moveDir = moveDir + Vector3.new(0, 1, 0)
-            end
-            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
-                moveDir = moveDir - Vector3.new(0, 1, 0)
-            end
-            if moveDir.Magnitude > 0 then
-                moveDir = moveDir.Unit
-            end
-            flyBV.Velocity = moveDir * speed
+            local sp = Settings.FlySpeed
+            local dir = Vector3.zero
+            if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + Camera.CFrame.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - Camera.CFrame.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - Camera.CFrame.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + Camera.CFrame.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0, 1, 0) end
+            if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then dir = dir - Vector3.new(0, 1, 0) end
+            if dir.Magnitude > 0 then dir = dir.Unit end
+            flyBV.Velocity = dir * sp
             flyBG.CFrame = Camera.CFrame
         end
     else
-        if flyActive then
-            stopFly()
-        end
+        if flyActive then stopFly() end
     end
 end)
 
--- AUTO STEAL & COLLECT LOOP (Heartbeat)
+-- HEARTBEAT LOOP (egg collecting, hatching, selling, ESP)
 RunService.Heartbeat:Connect(function()
     local char = LocalPlayer.Character
     if not char then return end
@@ -1323,212 +1048,147 @@ RunService.Heartbeat:Connect(function()
     if not root then return end
     local now = tick()
 
-    -- AUTO STEAL (ProximityPrompt)
-    if Settings.AutoSteal and now - lastStealTime > Settings.AutoStealDelay then
-        lastStealTime = now
-        for _, data in ipairs(gameData.prompts) do
-            pcall(function()
-                local prompt = data.Prompt
-                local obj = data.Object
-                if prompt and prompt.Parent then
-                    local pos
-                    if obj:IsA("Model") then
-                        local p = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
-                        if p then pos = p.Position end
-                    elseif obj:IsA("BasePart") then
-                        pos = obj.Position
-                    end
-                    if pos and (pos - root.Position).Magnitude <= prompt.MaxActivationDistance + 5 then
-                        fireproximityprompt(prompt)
+    -- AUTO COLLECT EGGS (ProximityPrompt + remote)
+    if Settings.AutoCollectEggs and now - lastCollectTime > 0.3 then
+        lastCollectTime = now
+
+        -- Yakinindaki ProximityPrompt'lari tetikle
+        pcall(function()
+            for _, obj in ipairs(workspace:GetDescendants()) do
+                if obj:IsA("ProximityPrompt") and obj.Enabled then
+                    local parent = obj.Parent
+                    if parent and parent:IsA("BasePart") then
+                        local dist = (parent.Position - root.Position).Magnitude
+                        if dist <= obj.MaxActivationDistance + 2 then
+                            fireproximityprompt(obj)
+                        end
+                    elseif parent then
+                        local part = parent:FindFirstChildWhichIsA("BasePart")
+                        if part then
+                            local dist = (part.Position - root.Position).Magnitude
+                            if dist <= obj.MaxActivationDistance + 2 then
+                                fireproximityprompt(obj)
+                            end
+                        end
                     end
                 end
-            end)
-        end
+            end
+        end)
     end
 
-    -- AUTO TELEPORT TO EGGS
-    if Settings.AutoTeleportEgg and now - lastStealTime > 1 then
-        for _, egg in ipairs(gameData.eggLocations) do
-            pcall(function()
-                local pos
-                if egg:IsA("Model") then
-                    local p = egg.PrimaryPart or egg:FindFirstChildWhichIsA("BasePart")
-                    if p then pos = p.Position end
-                elseif egg:IsA("BasePart") then
-                    pos = egg.Position
-                end
-                if pos then
-                    root.CFrame = CFrame.new(pos + Vector3.new(0, 2, 0))
-                    task.wait(Settings.AutoStealDelay + 0.3)
-                end
-            end)
-        end
-    end
-
-    -- AUTO HATCH (remote arama)
-    if Settings.AutoHatch and now - lastHatchTime > Settings.AutoHatchDelay then
+    -- AUTO HATCH
+    if Settings.AutoHatch and now - lastHatchTime > 1 then
         lastHatchTime = now
-        for _, r in ipairs(gameData.remotes) do
-            pcall(function()
-                local n = r.Name:lower()
-                if n:find("hatch") or n:find("open") then
-                    if r.Type == "RemoteEvent" then
-                        r.Object:FireServer()
-                    elseif r.Type == "RemoteFunction" then
-                        r.Object:InvokeServer()
-                    end
-                end
-            end)
-        end
+        pcall(function()
+            if Remotes.AskHatch then
+                Remotes.AskHatch:InvokeServer()
+            end
+            if Remotes.AskFinishHatch then
+                Remotes.AskFinishHatch:InvokeServer()
+            end
+        end)
     end
 
-    -- AUTO COLLECT
-    if Settings.AutoCollect then
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            pcall(function()
-                if obj:IsA("BasePart") and obj.Name:lower():find("collect") then
-                    if (obj.Position - root.Position).Magnitude < 50 then
-                        firetouchinterest(root, obj, 0)
-                        task.defer(function()
-                            firetouchinterest(root, obj, 1)
-                        end)
-                    end
-                end
-            end)
-        end
+    -- AUTO SELL PETS
+    if Settings.AutoSellPets and now - lastSellTime > 3 then
+        lastSellTime = now
+        pcall(function()
+            if Remotes.SellEveryPet then
+                Remotes.SellEveryPet:FireServer()
+            end
+        end)
     end
 
-    -- AUTO CHEST
-    if Settings.AutoChest then
-        for _, chest in ipairs(gameData.chests) do
-            pcall(function()
-                if chest and chest.Parent then
-                    local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
-                    if prompt then
-                        local pos
-                        if chest:IsA("Model") then
-                            local p = chest.PrimaryPart or chest:FindFirstChildWhichIsA("BasePart")
-                            if p then pos = p.Position end
-                        elseif chest:IsA("BasePart") then
-                            pos = chest.Position
-                        end
-                        if pos and (pos - root.Position).Magnitude <= prompt.MaxActivationDistance + 5 then
-                            fireproximityprompt(prompt)
-                        end
-                    end
-                end
-            end)
-        end
-    end
-
-    -- ESP UPDATE
-    if Settings.EggESP then
-        for _, egg in ipairs(gameData.eggLocations) do
-            pcall(function()
-                if egg and egg.Parent then
-                    addHighlight(egg, Color3.fromRGB(255, 200, 50), egg.Name)
-                end
-            end)
-        end
-    end
-
-    if Settings.ChestESP then
-        for _, chest in ipairs(gameData.chests) do
-            pcall(function()
-                if chest and chest.Parent then
-                    addHighlight(chest, Color3.fromRGB(100, 200, 255), chest.Name)
-                end
-            end)
-        end
-    end
-
+    -- PLAYER ESP
     if Settings.PlayerESP then
         for _, plr in ipairs(Players:GetPlayers()) do
             if plr ~= LocalPlayer and plr.Character then
                 pcall(function()
-                    addHighlight(plr.Character, Color3.fromRGB(255, 80, 80), plr.DisplayName)
+                    if not espCache[plr.UserId] then
+                        local hl = Instance.new("Highlight")
+                        hl.FillColor = Color3.fromRGB(255, 80, 80)
+                        hl.FillTransparency = 0.6
+                        hl.OutlineColor = Color3.fromRGB(255, 100, 100)
+                        hl.OutlineTransparency = 0.1
+                        hl.Adornee = plr.Character
+                        hl.Parent = plr.Character
+                        espCache[plr.UserId] = hl
+                    end
                 end)
             end
         end
     end
 
-    -- ESP temizleme (kapaliysa)
-    if not Settings.EggESP and not Settings.ChestESP and not Settings.PlayerESP then
-        if next(espHighlights) then
-            clearESP()
-        end
+    -- EGG ESP
+    if Settings.EggESP then
+        pcall(function()
+            for _, obj in ipairs(workspace:GetDescendants()) do
+                local n = obj.Name:lower()
+                if (n:find("egg") or n:find("nest")) and (obj:IsA("Model") or obj:IsA("BasePart")) then
+                    local key = "egg_" .. obj:GetFullName()
+                    if not espCache[key] then
+                        local hl = Instance.new("Highlight")
+                        hl.FillColor = Color3.fromRGB(255, 220, 50)
+                        hl.FillTransparency = 0.5
+                        hl.OutlineColor = Color3.fromRGB(255, 200, 30)
+                        hl.OutlineTransparency = 0
+                        hl.Adornee = obj
+                        hl.Parent = obj
+                        espCache[key] = hl
+                    end
+                end
+            end
+        end)
+    end
+
+    -- ESP temizleme
+    if not Settings.PlayerESP and not Settings.EggESP then
+        if next(espCache) then clearESP() end
     end
 end)
 
--- ===================== KEYBIND =====================
+-- REMOTE SPY
+if hookmetamethod then
+    pcall(function()
+        local oldNamecall
+        -- Zaten hook ettik, remote spy icin ayri bir mekanizma
+        -- Sadece bilgi loglamak icin
+    end)
+end
+
+-- ===================== KEYBINDS =====================
 local guiWasVisible = true
-local menuOpen = false
 
 UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
-
-    -- Toggle GUI: RightShift
     if input.KeyCode == Enum.KeyCode.RightShift then
         MainFrame.Visible = not MainFrame.Visible
     end
-
-    -- Toggle Fly: F
     if input.KeyCode == Enum.KeyCode.F then
         Settings.FlyEnabled = not Settings.FlyEnabled
         showToast(Settings.FlyEnabled and "Fly: ON" or "Fly: OFF", Settings.FlyEnabled and Theme.Success or Theme.Error)
     end
-
-    -- Toggle Speed: X
-    if input.KeyCode == Enum.KeyCode.X then
-        Settings.SpeedEnabled = not Settings.SpeedEnabled
-        showToast(Settings.SpeedEnabled and "Speed: ON" or "Speed: OFF", Settings.SpeedEnabled and Theme.Success or Theme.Error)
-    end
-
-    -- Toggle Noclip: Z
-    if input.KeyCode == Enum.KeyCode.Z then
-        Settings.Noclip = not Settings.Noclip
-        showToast(Settings.Noclip and "Noclip: ON" or "Noclip: OFF", Settings.Noclip and Theme.Success or Theme.Error)
-    end
 end)
 
--- ESC MENU HANDLER
+-- ESC HANDLER
 pcall(function()
     game:GetService("GuiService").MenuOpened:Connect(function()
-        menuOpen = true
         guiWasVisible = MainFrame.Visible
         MainFrame.Visible = false
         if flyActive then stopFly() end
     end)
     game:GetService("GuiService").MenuClosed:Connect(function()
-        menuOpen = false
         MainFrame.Visible = guiWasVisible
     end)
 end)
 
--- CLOSE & MINIMIZE
-closeBtn.MouseButton1Click:Connect(function()
-    MainFrame.Visible = false
-end)
-
-minimizeBtn.MouseButton1Click:Connect(function()
-    MainFrame.Visible = false
-    showToast("RightShift ile tekrar ac", Theme.Primary, 3)
-end)
-
--- AUTO RECONNECT
-game:GetService("Players").LocalPlayer.OnTeleport:Connect(function(state)
-    if state == Enum.TeleportState.Failed and Settings.AutoReconnect then
-        task.delay(3, function()
-            TeleportService:Teleport(game.PlaceId, LocalPlayer)
-        end)
-    end
-end)
-
 -- ===================== INIT =====================
-switchTab("FARM")
-showToast("EGG HUNTER HUB yuklendi!", Theme.Success, 4)
-showToast("RightShift = GUI Ac/Kapa", Theme.Primary, 5)
-showToast("F=Fly  X=Speed  Z=Noclip", Theme.Primary, 6)
+switchTab("Farm")
+showToast("EGG HUNTER v2 yuklendi!", Theme.Success, 4)
+showToast("Bypass: " .. (bypassResult and "AKTIF" or "PASIF"), bypassResult and Theme.Success or Theme.Error, 4)
+showToast("RightShift = GUI | F = Fly", Theme.Primary, 5)
+showToast(remoteCount .. " remote bulundu", Theme.Primary, 4)
 
-print("[EGG HUB] Basariyla yuklendi!")
-print("[EGG HUB] Eggs: " .. #gameData.eggLocations .. " | Prompts: " .. #gameData.prompts .. " | Areas: " .. #gameData.areas)
+print("[EGG HUB v2] Basariyla yuklendi!")
+print("[EGG HUB v2] Bypass: " .. tostring(bypassResult))
+print("[EGG HUB v2] Remotes: " .. remoteCount)
